@@ -1,0 +1,7 @@
+.venev/
+__pycache__/
+*.py[cod]
+.env
+alembic/versions/__pycache__/
+.pytest_cache/
+.coverage
