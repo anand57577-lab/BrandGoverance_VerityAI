@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core.database import get_db
 from app.models.organization import Brand
@@ -33,13 +34,20 @@ def create_guideline(
             detail="Brand not found.",
         )
 
+    latest_version = (
+        db.query(func.max(BrandGuideline.version))
+        .filter(BrandGuideline.brand_id == brand_id)
+        .scalar()
+        or 0
+    )
+
     guideline = BrandGuideline(
         brand_id=brand_id,
         voice_and_tone=payload.voice_and_tone,
         preferred_terminology=payload.preferred_terminology,
         restricted_phrases=payload.restricted_phrases,
         visual_identity_notes=payload.visual_identity_notes,
-        version=1,
+        version=latest_version + 1,
         approval_status="pending",
     )
 

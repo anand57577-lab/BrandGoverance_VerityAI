@@ -1,5 +1,6 @@
 
 import re
+import logging
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -10,9 +11,8 @@ from app.models.document import Document
 from app.services.text_extraction import extract_text_from_pdf
 from app.services.gemini_service import analyze_with_gemini
 
-import logging
-
 logger = logging.getLogger(__name__)
+
 
 def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text.casefold()).strip()
@@ -56,6 +56,7 @@ def analyze_advertisement(
     product: Product,
     advertisement_text: str,
 ) -> dict:
+
     ad_text = advertisement_text.strip()
     findings: list[dict] = []
 
@@ -63,23 +64,26 @@ def analyze_advertisement(
     organization = brand.organization
 
     organization_info = {
-    "legal_name": organization.legal_name,
-    "industry": organization.industry,
-    "country_market": organization.country_market,
-    "description": organization.description,
+        "legal_name": organization.legal_name,
+        "industry": organization.industry,
+        "country_market": organization.country_market,
+        "description": organization.description,
     }
 
     brand_name = brand.name
-    
-    
+
+    # Fetch approved brand guidelines.
     guidelines = (
         db.query(BrandGuideline)
-        .filter(BrandGuideline.brand_id == product.brand_id, 
-                BrandGuideline.approval_status == "approved")
+        .filter(
+            BrandGuideline.brand_id == product.brand_id,
+            BrandGuideline.approval_status == "approved",
+        )
         .order_by(BrandGuideline.version.desc())
         .all()
     )
 
+    # Fetch approved product claims.
     approved_claims = (
         db.query(ApprovedClaim)
         .filter(
@@ -98,13 +102,14 @@ def analyze_advertisement(
         .count()
     )
 
-    # Keep the guideline record ID attached to each restricted phrase.
+    # Collect restricted phrases.
     restricted_phrases: list[tuple[str, int]] = []
 
     for guideline in guidelines:
         for phrase in _split_lines(guideline.restricted_phrases):
             restricted_phrases.append((phrase, guideline.id))
 
+    # Rule-based restricted phrase detection.
     for phrase, guideline_id in restricted_phrases:
         if _contains_phrase(ad_text, phrase):
             findings.append({
@@ -122,7 +127,7 @@ def analyze_advertisement(
                 ),
             })
 
-    # Match explicitly approved claim wording.
+    # Approved claim wording matches.
     for claim in approved_claims:
         if _contains_phrase(ad_text, claim.claim_text):
             findings.append({
@@ -139,7 +144,7 @@ def analyze_advertisement(
                 "suggested_correction": None,
             })
 
-    # Product specifications are reference information, not proof.
+    # Product specification matches.
     specifications = product.specifications or ""
 
     for line in _split_lines(specifications):
@@ -157,8 +162,7 @@ def analyze_advertisement(
                 "suggested_correction": None,
             })
 
-    # Retrieve documents associated with this brand and either:
-    # (a) this product specifically, or (b) the whole brand.
+    # Retrieve product-specific and brand-level documents.
     documents = (
         db.query(Document)
         .filter(
@@ -184,7 +188,7 @@ def analyze_advertisement(
         if (document.approval_status or "").casefold() == "pending"
     ]
 
-    # Extract text from approved PDFs and compare literal wording.
+    # Extract approved PDF text.
     extracted_documents: list[dict] = []
     extraction_failures = 0
 
@@ -196,12 +200,15 @@ def analyze_advertisement(
                 "document": document,
                 "text": extracted_text,
             })
+
         except (ValueError, TypeError):
             extraction_failures += 1
 
+    # Run Gemini semantic analysis.
     
-    # Run Gemini using only approved guidelines, claims and documents.
+    # Run Gemini as the only claim evaluator.
     gemini_result = None
+    gemini_error = None
 
     try:
         gemini_result = analyze_with_gemini(
@@ -226,23 +233,75 @@ def analyze_advertisement(
             approved_documents=[
                 {
                     "filename": item["document"].filename,
-                    "text": item["text"][:12000],
+                    "text": item["text"][:4000],
                 }
-                for item in extracted_documents
+                for item in extracted_documents[:3]
             ],
         )
-    except Exception:
-        # Keep the existing rule-based analysis available if Gemini fails.
-        logger.exception("Gemini analysis failed; continuing with rule-based findings.")
-        gemini_result = None
+        logger.info("GEMINI CONCLUSION: %s",gemini_result.get("conclusion"))
+    except Exception as exc:
+        gemini_error = str(exc)
+        logger.exception("Gemini analysis failed")
 
-    
-    
+    # Do not silently replace AI findings with Python findings.
+    if gemini_result is None:
+        raise RuntimeError(
+            f"Gemini analysis unavailable. No AI result was generated. "
+            f"Details: {gemini_error}"
+        )
+
+    # Gemini is the sole source of claim findings and risk assessment.
+    limitations = list(gemini_result.get("limitations", []))
+
+    limitations.extend([
+        "Analysis was generated by Gemini AI using the supplied database evidence.",
+        "Only approved documents and approved claims were used as approved evidence.",
+        "A semantic match does not independently prove factual accuracy.",
+        "Scanned or image-only PDFs require OCR, which is not implemented.",
+        "Human review is required before publication.",
+    ])
+
+    if pending_claims:
+        limitations.append(
+            f"{pending_claims} claim(s) are pending approval "
+            "and were excluded from approved evidence."
+        )
+
+    if pending_documents:
+        limitations.append(
+            f"{len(pending_documents)} document(s) are pending approval "
+            "and were excluded from approved evidence."
+        )
+
+    if extraction_failures:
+        limitations.append(
+            f"{extraction_failures} approved document(s) could not "
+            "be processed for PDF text evidence."
+        )
+
+    return {
+        "product_id": product.id,
+        "product_name": product.name,
+        "analysis_engine": "Gemini AI Only",
+        "gemini_status": "completed",
+        "gemini_model": gemini_result.get("model_used"),
+        "gemini_error": None,
+        "overall_status": gemini_result["overall_status"],
+        "risk_level": gemini_result["risk_level"],
+        "summary": gemini_result["summary"],
+        "conclusion": gemini_result["conclusion"],
+        "findings": gemini_result["findings"],
+        "limitations": list(dict.fromkeys(limitations)),
+    }
+
+
+    # Check advertisement statements against approved PDF text.
     claims = _split_claims(ad_text)
     evidence_matched_claims: set[str] = set()
 
     for claim_text in claims:
         for item in extracted_documents:
+
             if _contains_phrase(item["text"], claim_text):
                 document = item["document"]
 
@@ -263,20 +322,24 @@ def analyze_advertisement(
                     "suggested_correction": None,
                 })
 
-                evidence_matched_claims.add(_normalise(claim_text))
+                evidence_matched_claims.add(
+                    _normalise(claim_text)
+                )
                 break
 
-    # Flag advertisement statements that have no direct wording match.
-    # Do not treat a restricted phrase or a stored specification as proof.
+    # Identify statements without direct evidence matches.
     approved_claim_texts = [
         claim.claim_text
         for claim in approved_claims
         if claim.claim_text
     ]
 
-    specification_lines = _split_lines(product.specifications or "")
+    specification_lines = _split_lines(
+        product.specifications or ""
+    )
 
     for claim_text in claims:
+
         if _normalise(claim_text) in evidence_matched_claims:
             continue
 
@@ -315,6 +378,7 @@ def analyze_advertisement(
             ),
         })
 
+    # Ensure that the analysis always has at least one finding.
     if not findings:
         findings.append({
             "claim_text": ad_text,
@@ -332,6 +396,7 @@ def analyze_advertisement(
             ),
         })
 
+    # Determine initial rule-based status.
     has_conflict = any(
         finding["status"] == "guideline_conflict"
         for finding in findings
@@ -349,6 +414,7 @@ def analyze_advertisement(
             "One or more restricted phrases were detected. "
             "Review the flagged wording before publication."
         )
+
     elif has_unverified:
         overall_status = "needs_review"
         risk_level = "medium"
@@ -356,6 +422,7 @@ def analyze_advertisement(
             "One or more statements lack a direct match in the "
             "available references and need further review."
         )
+
     else:
         overall_status = "matched_reference"
         risk_level = "low"
@@ -364,21 +431,28 @@ def analyze_advertisement(
             "These matches do not independently prove factual accuracy."
         )
 
-    limitations = [
-        "This service uses literal text matching, not semantic AI reasoning.",
+    # Build limitations.
+    limitations = []
+
+    if gemini_result is None:
+        limitations.append(
+            "Gemini analysis was unavailable. Results contain "
+            "rule-based checks only."
+        )
+    else:
+        limitations.append(
+            "This analysis combines Gemini AI semantic reasoning "
+            "with database evidence and rule-based checks."
+        )
+
+    limitations.extend([
         "PDF text is extracted only from approved documents associated "
         "with the selected product or its brand.",
         "A wording match does not prove that a claim is factually true.",
         "Scanned or image-only PDFs require OCR, which is not implemented.",
         "Documents marked pending are not treated as approved evidence.",
         "Human review is required before a final publication decision.",
-    ]
-    
-    if gemini_result is None:
-        limitations.append(
-        "Gemini analysis was unavailable. Results contain rule-based "
-        "checks only and must not be presented as AI-assisted analysis."
-    )
+    ])
 
     if pending_claims:
         limitations.append(
@@ -397,9 +471,10 @@ def analyze_advertisement(
             f"{extraction_failures} approved document(s) could not be "
             "searched because their text could not be extracted."
         )
-    
-    # Add Gemini findings while preserving the existing rule-based results.
+
+    # Merge Gemini semantic findings with rule-based findings.
     if gemini_result:
+
         existing_keys = {
             (
                 _normalise(str(f.get("claim_text", ""))),
@@ -409,6 +484,7 @@ def analyze_advertisement(
         }
 
         for finding in gemini_result.get("findings", []):
+
             if not isinstance(finding, dict):
                 continue
 
@@ -428,10 +504,13 @@ def analyze_advertisement(
         )
 
         for limitation in gemini_result.get("limitations", []):
-            if isinstance(limitation, str) and limitation not in limitations:
+            if (
+                isinstance(limitation, str)
+                and limitation not in limitations
+            ):
                 limitations.append(limitation)
 
-        # Apply conservative status escalation; do not downgrade rule findings.
+        # Conservative status escalation.
         if gemini_result.get("overall_status") == "issues_found":
             overall_status = "issues_found"
             risk_level = "high"
@@ -439,6 +518,7 @@ def analyze_advertisement(
                 "Gemini identified potential advertisement issues. "
                 "Review the findings before publication."
             )
+
         elif (
             gemini_result.get("overall_status") == "needs_review"
             and overall_status == "matched_reference"
@@ -449,14 +529,35 @@ def analyze_advertisement(
                 "The advertisement requires further evidence-based review."
             )
 
-    
-        
+    # Return analysis and AI provenance.
     return {
         "product_id": product.id,
         "product_name": product.name,
+
+        "analysis_engine": (
+            "Gemini AI + Rule-Based Analysis"
+            if gemini_result is not None
+            else "Rule-Based Analysis Only"
+        ),
+
+        "gemini_status": (
+            "completed"
+            if gemini_result is not None
+            else "unavailable"
+        ),
+
+        "gemini_model": (
+            gemini_result.get("model_used")
+            if gemini_result is not None
+            else None
+        ),
+
+        "gemini_error": gemini_error,
+
         "overall_status": overall_status,
         "risk_level": risk_level,
         "summary": summary,
+        "conclusion": gemini_result["conclusion"],
         "findings": findings,
         "limitations": limitations,
     }

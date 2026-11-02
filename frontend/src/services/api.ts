@@ -1,12 +1,48 @@
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const FALLBACK_API_BASE_URL = "http://127.0.0.1:8000";
+
+function normalizeApiBaseUrl(value?: string): string {
+  const configured = (value ?? "").trim();
+
+  if (!configured) {
+    if (import.meta.env.PROD) {
+      console.warn(
+        "VITE_API_BASE_URL is missing. Using the local development fallback until the deployed backend URL is configured.",
+      );
+    }
+    return FALLBACK_API_BASE_URL;
+  }
+
+  try {
+    const url = new URL(configured);
+    return url.origin.replace(/\/+$/, "");
+  } catch {
+    if (import.meta.env.PROD) {
+      console.warn(
+        `VITE_API_BASE_URL is invalid: "${configured}". Update it to a valid backend URL before deployment.`,
+      );
+    }
+    return FALLBACK_API_BASE_URL;
+  }
+}
+
+export const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+
+export function buildApiUrl(path: string): string {
+  const cleanBase = API_BASE_URL.replace(/\/+$/, "");
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return `${cleanBase}${cleanPath}`;
+}
+
+export function buildDocumentDownloadUrl(documentId: number): string {
+  return buildApiUrl(`/api/documents/${documentId}/download`);
+}
 
 async function request<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetch(buildApiUrl(path), options);
 
   if (!response.ok) {
     const body = await response.text();
@@ -117,6 +153,24 @@ export async function getOrganization(
   return request<OrganizationResponse>(`/api/organizations/${id}`);
 }
 
+
+export async function getCurrentOrganization(): Promise<OrganizationResponse | null> {
+  return request<OrganizationResponse | null>(
+    "/api/organizations/current"
+  );
+}
+
+export async function updateOrganization(
+  id: number,
+  payload: Partial<OrganizationPayload>,
+): Promise<OrganizationResponse> {
+  return request<OrganizationResponse>(`/api/organizations/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function saveGuidelines(
   brandId: number,
   payload: GuidelinePayload,
@@ -192,6 +246,7 @@ export interface GovernanceResponse {
   overall_status: string;
   risk_level: string;
   summary: string;
+  conclusion: string;
   findings: GovernanceFinding[];
   limitations: string[];
 }
@@ -208,4 +263,18 @@ export async function analyzeAdvertisement(
       advertisement_text: advertisementText,
     }),
   });
+}
+
+export interface ApprovedAdvertisement {
+  id: number;
+  product_id: number;
+  product_name: string;
+  product_details: string | null;
+  advertisement_text: string;
+  status: string;
+  created_at: string;
+}
+
+export async function getApprovedAdvertisements(): Promise<ApprovedAdvertisement[]> {
+  return request<ApprovedAdvertisement[]>("/api/governance/approved");
 }

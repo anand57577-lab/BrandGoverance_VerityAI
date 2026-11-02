@@ -19,8 +19,17 @@ class Finding(BaseModel):
 class AdvertisementAnalysisResponse(BaseModel):
     product_id: int
     product_name: str
+
+    # AI engine information
+    analysis_engine: str
+    gemini_status: str
+    gemini_model: str | None = None
+    gemini_error: str | None = None
+
+    # Analysis results
     overall_status: str
     risk_level: str
     summary: str
+    conclusion: str
     findings: list[Finding]
     limitations: list[str]

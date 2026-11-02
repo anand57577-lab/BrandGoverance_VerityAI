@@ -1,13 +1,20 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Routes, Route, useLocation } from "react-router-dom";
 import {
   createOrganization,
   saveGuidelines,
+  getCurrentOrganization,
+  updateOrganization,
   createProduct,
   uploadDocument,
   listProducts,
   listDocuments,
+  getGuidelines,
+  analyzeAdvertisement,
+  getOrganization,
+  buildDocumentDownloadUrl,
 } from "./services/api";
+
 
 import {
   ShieldCheck,
@@ -39,6 +46,7 @@ import {
   Clock3,
 } from "lucide-react";
 type Product = {
+  id?: number;
   name: string;
   sku: string;
   category: string;
@@ -52,24 +60,7 @@ type Finding = {
   detail: string;
   source: string;
 };
-const initial: Product[] = [
-  {
-    name: "Classic Biscuits",
-    sku: "CB-001",
-    category: "Biscuits & snacks",
-    facts: "Sugar: 5 g per serving; contains wheat",
-    claims: "Contains wheat; baked snack",
-    proof: "classic-biscuits-spec.pdf",
-  },
-  {
-    name: "Oat & Honey Bites",
-    sku: "OH-002",
-    category: "Biscuits & snacks",
-    facts: "Contains oats and honey; contains gluten",
-    claims: "Made with oats and honey",
-    proof: "oat-honey-product-sheet.pdf",
-  },
-];
+const initial: Product[] = [];
 const links = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, group: "WORKSPACE" },
   {
@@ -106,70 +97,200 @@ const links = [
 ];
 export default function App() {
   const [products, setProducts] = useState(initial),
-    [org, setOrg] = useState("Northstar Foods Pvt. Ltd."),
-    [brand, setBrand] = useState("Northstar Foods"),
-    [guides, setGuides] = useState(
-      "Friendly, clear, trustworthy. Avoid unsupported health promises and absolute claims.",
-    ),
+    [org, setOrg] = useState(""),
+    [brand, setBrand] = useState(""),
+    [guides, setGuides] = useState(""),
+
     [ad, setAd] = useState(""),
-    [selected, setSelected] = useState("Classic Biscuits"),
+    [selected, setSelected] = useState("Biscuits"),
     [file, setFile] = useState(""),
     [findings, setFindings] = useState<Finding[] | null>(null),
     [toast, setToast] = useState(""),
     [mobile, setMobile] = useState(false);
+  const [analysis, setAnalysis] = useState<any>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [organizationId, setOrganizationId] = useState<number | null>(() => {
+    const value = localStorage.getItem("verityai_organization_id");
+    return value ? Number(value) : null;
+  });
+  const [brandId, setBrandId] = useState<number | null>(() => {
+    const value = localStorage.getItem("verityai_brand_id");
+    return value ? Number(value) : null;
+  });
+
+  useEffect(() => {
+    let active = true;
+
+    getCurrentOrganization()
+      .then((result) => {
+        if (!active) return;
+
+        if (!result) {
+          setOrg("");
+          setBrand("");
+          setOrganizationId(null);
+          setBrandId(null);
+
+          localStorage.removeItem("verityai_organization_id");
+          localStorage.removeItem("verityai_brand_id");
+
+          return;
+        }
+
+        setOrganizationId(result.id);
+        setBrandId(result.brand_id);
+        setOrg(result.legal_name);
+        setBrand(result.primary_brand_name);
+
+        localStorage.setItem("verityai_organization_id", String(result.id));
+        localStorage.setItem("verityai_brand_id", String(result.brand_id));
+      })
+      .catch((error) => {
+        console.error("Organization loading failed:", error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+
+  useEffect(() => {
+    let active = true;
+
+    getCurrentOrganization()
+      .then((result) => {
+        if (!active) return;
+
+        if (!result) {
+          setOrg("");
+          setBrand("");
+          setOrganizationId(null);
+          setBrandId(null);
+
+          localStorage.removeItem("verityai_organization_id");
+          localStorage.removeItem("verityai_brand_id");
+
+          return;
+        }
+
+        setOrganizationId(result.id);
+        setBrandId(result.brand_id);
+        setOrg(result.legal_name);
+        setBrand(result.primary_brand_name);
+
+        localStorage.setItem("verityai_organization_id", String(result.id));
+        localStorage.setItem("verityai_brand_id", String(result.brand_id));
+      })
+      .catch((error) => {
+        console.error("Could not load current organization:", error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+
+
   const loc = useLocation();
   const page = links.find((x) => x.to === loc.pathname)?.label || "Workspace";
   const notify = (s: string) => {
     setToast(s);
     setTimeout(() => setToast(""), 2600);
   };
-  const analyze = () => {
-    if (!ad.trim() && !file) {
-      notify("Paste advertisement text or choose a file first.");
+
+
+  useEffect(() => {
+    let active = true;
+
+    if (!brandId) {
+      setProducts([]);
+      return () => {
+        active = false;
+      };
+    }
+
+    listProducts(brandId)
+      .then((rows: any[]) => {
+        if (!active) return;
+
+        const loadedProducts: Product[] = rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          sku: row.sku,
+          category: row.category || "",
+          facts: row.specifications || "",
+          claims: Array.isArray(row.claims)
+            ? row.claims.map((claim: any) => claim.claim_text).join("\n")
+            : "",
+          proof: "See Proof documents",
+        }));
+
+        setProducts(loadedProducts);
+
+        setSelected((current) =>
+          loadedProducts.some((p) => p.name === current)
+            ? current
+            : loadedProducts[0]?.name || ""
+        );
+      })
+      .catch((error: unknown) => {
+        console.error("Could not load products for Brand Governance:", error);
+        if (active) {
+          notify(
+            error instanceof Error
+              ? error.message
+              : "Could not load products."
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [brandId]);
+
+
+  const analyze = async () => {
+    if (!ad.trim()) {
+      notify("Please enter advertisement text first.");
       return;
     }
-    const p = products.find((x) => x.name === selected) || products[0],
-      t = ad.toLowerCase();
-    let f: Finding[] = [];
-    if (/zero sugar|sugar-free|sugar free/.test(t))
-      f.push({
-        title: "Sugar-related claim",
-        status: p.facts.toLowerCase().includes("sugar: 5 g")
-          ? "Conflicting"
-          : "Unverified",
-        detail: p.facts.toLowerCase().includes("sugar: 5 g")
-          ? "The ad says zero sugar, but the sample product facts list 5 g of sugar per serving. Human review is required."
-          : "No approved sugar value was found in this sample record.",
-        source: p.proof || "No approved source",
-      });
-    if (/cure|guaranteed|best in the world/.test(t))
-      f.push({
-        title: "Absolute or high-risk wording",
-        status: "Unverified",
-        detail:
-          "This wording may need substantiation or review against approved claims and applicable rules.",
-        source: "Brand guidelines — review required",
-      });
-    if (!f.length)
-      f.push({
-        title: "No matching issue detected by demo rules",
-        status: "Unverified",
-        detail:
-          "This prototype checks only a small set of demonstration rules. This is not proof that every claim is accurate.",
-        source: "Limited demo rules",
-      });
-    f.push({
-      title: "Brand tone and guideline check",
-      status: "Unverified",
-      detail:
-        "Guideline retrieval and semantic analysis will be connected in the backend phase.",
-      source: "Brand guidelines",
-    });
-    setFindings(f);
-    notify("Demo analysis complete. No real AI or backend is connected.");
+
+    const product = products.find((p) => p.name === selected);
+    if (!product?.id) {
+      notify("No database product ID found. Save the product first.");
+      return;
+    }
+
+    setAnalyzing(true);
+    setFindings(null);
+    setAnalysis(null);
+
+    try {
+      const result = await analyzeAdvertisement(product.id, ad.trim());
+      setAnalysis(result);
+      setFindings(
+        result.findings.map((finding: any) => ({
+          title: finding.claim_text || "Advertisement finding",
+          status: String(finding.status || "unknown").replace(/_/g, " "),
+          detail: finding.explanation || "",
+          source: finding.source || "No source supplied",
+        })),
+      );
+      notify("Advertisement analysis completed.");
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Advertisement analysis failed.",
+      );
+    } finally {
+      setAnalyzing(false);
+    }
   };
-  const [organizationId, setOrganizationId] = useState<number | null>(null);
-  const [brandId, setBrandId] = useState<number | null>(null);
+
   return (
     <div className="shell">
       <aside className={"sidebar " + (mobile ? "open" : "")}>
@@ -395,8 +516,7 @@ export default function App() {
                     />
                   </div>
                   <div className="notice">
-                    <LockKeyhole size={15} /> Prototype only: dashboard metrics
-                    are illustrative; there is no server connected yet.
+                    <LockKeyhole size={15} /> Dashboard activity metrics remain illustrative; organisation, product and document forms connect to the backend.
                   </div>
                 </>
               }
@@ -420,6 +540,10 @@ export default function App() {
                     products={products}
                     setProducts={setProducts}
                     notify={notify}
+                    organizationId={organizationId}
+                    setOrganizationId={setOrganizationId}
+                    brandId={brandId}
+                    setBrandId={setBrandId}
                   />
                 </>
               }
@@ -445,9 +569,15 @@ export default function App() {
                             value={selected}
                             onChange={(e) => setSelected(e.target.value)}
                           >
-                            {products.map((p) => (
-                              <option key={p.sku}>{p.name}</option>
-                            ))}
+                            <option value="">Select a database product</option>
+
+                            {products
+                              .filter((p) => Number.isInteger(p.id) && p.id! > 0)
+                              .map((p) => (
+                                <option key={p.id} value={p.name}>
+                                  {p.name} ({p.sku})
+                                </option>
+                              ))}
                           </select>
                         </Field>
                         <Field label="Content channel">
@@ -492,16 +622,20 @@ export default function App() {
                         yet.
                       </div>
                       <div className="actions">
-                        <button className="btn primary" onClick={analyze}>
-                          <Sparkles size={16} /> Analyze advertisement{" "}
-                          <ArrowRight size={16} />
+
+                        <button className="btn primary" onClick={analyze} disabled={analyzing}>
+                          <Sparkles size={16} />
+                          {analyzing ? "Analyzing…" : "Analyze advertisement"}
+                          {!analyzing && <ArrowRight size={16} />}
                         </button>
+
                         <button
                           className="btn secondary"
                           onClick={() => {
                             setAd("");
                             setFile("");
                             setFindings(null);
+                            setAnalysis(null);
                           }}
                         >
                           Clear
@@ -530,13 +664,39 @@ export default function App() {
                           </div>
                         ) : (
                           <>
-                            <div className="demoalert">
-                              <b>Demo analysis only</b>
-                              <p>
-                                These results use local sample rules, not a live
-                                LLM or database.
-                              </p>
-                            </div>
+
+                            {analysis && (
+                              <>
+                                <div className="demoalert">
+                                  <div style={{ marginBottom: "8px" }}>
+                                    <b>Analysis Engine: </b>
+                                    <span>
+                                      {analysis.analysis_engine || "Unknown"}
+                                    </span>
+                                  </div>
+
+                                  <div style={{ marginBottom: "8px" }}>
+                                    <b>Gemini Status: </b>
+                                    <span>
+                                      {analysis.gemini_status || "Unknown"}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {analysis.limitations?.length > 0 && (
+                                  <div className="notice">
+                                    <b>Limitations</b>
+                                    <ul>
+                                      {analysis.limitations.map((item: string, index: number) => (
+                                        <li key={index}>{item}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </>
+                            )}
+
+
                             {findings.map((f, i) => (
                               <div className="finding" key={i}>
                                 <div
@@ -640,68 +800,19 @@ export default function App() {
                 </>
               }
             />
+
             <Route
               path="/knowledge"
               element={
-                <>
-                  <Heading
-                    eyebrow="APPROVED SOURCES"
-                    title="Knowledge Base"
-                    desc="View brand rules, product facts and evidence references available to the verifier."
-                    action={
-                      <NavLink className="btn primary" to="/admin">
-                        <Plus size={16} /> Add information
-                      </NavLink>
-                    }
-                  />
-                  <div className="stats three">
-                    <Stat
-                      label="Products"
-                      value={String(products.length)}
-                      icon={<Package />}
-                      note="Current session"
-                    />
-                    <Stat
-                      label="Brand guidelines"
-                      value={guides ? "01" : "00"}
-                      icon={<BookOpenCheck />}
-                      note="Draft configuration"
-                    />
-                    <Stat
-                      label="Proof references"
-                      value={String(products.filter((p) => p.proof).length)}
-                      icon={<FileCheck2Icon />}
-                      note="Names only in prototype"
-                    />
-                  </div>
-                  <section className="panel">
-                    <PanelTitle
-                      title="Brand guidelines"
-                      sub={`${brand} · organisation-wide guidance`}
-                    />
-                    <p className="source-text">{guides}</p>
-                    <Badge text="Draft" />
-                    <hr />
-                    <PanelTitle
-                      title="Product facts & source records"
-                      sub="Records should be approved and traceable before production verification."
-                    />
-                    <Table
-                      rows={products.map((p) => [
-                        p.name,
-                        p.sku,
-                        p.facts || "—",
-                        p.proof || "Not attached",
-                      ])}
-                    />
-                    <div className="notice">
-                      Prototype data is held in React state and resets on
-                      refresh. Documents are not extracted or indexed.
-                    </div>
-                  </section>
-                </>
+                <KnowledgeBase
+                  brandId={brandId}
+                  brand={brand}
+                  notify={notify}
+                />
               }
             />
+
+
             <Route
               path="/reviews"
               element={
@@ -850,7 +961,7 @@ export default function App() {
                       <Detail label="Authentication" value="Not implemented" />
                       <Detail
                         label="PostgreSQL database"
-                        value="Not connected"
+                        value="FastAPI + PostgreSQL"
                       />
                       <Detail label="LLM / RAG" value="Planned" />
                     </section>
@@ -896,7 +1007,7 @@ export default function App() {
         </div>
         <footer>
           <span>© 2026 VerityAI</span>
-          <span>● Prototype mode · No backend connected</span>
+          <span>● Backend-connected workspace · AI analysis planned</span>
           <span>Built for responsible brand governance</span>
         </footer>
       </main>
@@ -969,11 +1080,11 @@ function Table({ rows }: { rows: string[][] }) {
           <tr>
             {(rows[0]?.length === 4
               ? [
-                  "PRODUCT / CONTENT",
-                  "ID / TYPE",
-                  "FACTS / STATUS",
-                  "SOURCE / STATUS",
-                ]
+                "PRODUCT / CONTENT",
+                "ID / TYPE",
+                "FACTS / STATUS",
+                "SOURCE / STATUS",
+              ]
               : ["CONTENT", "TYPE", "STATUS"]
             ).map((x, i) => (
               <th key={i}>{x}</th>
@@ -986,7 +1097,7 @@ function Table({ rows }: { rows: string[][] }) {
               {r.map((v, j) => (
                 <td key={j}>
                   {j === 2 &&
-                  ["Approved", "Needs review", "Conflicting"].includes(v) ? (
+                    ["Approved", "Needs review", "Conflicting"].includes(v) ? (
                     <Badge text={v} />
                   ) : (
                     v
@@ -1047,8 +1158,18 @@ function Admin({
   products,
   setProducts,
   notify,
+  organizationId,
+  setOrganizationId,
+  brandId,
+  setBrandId,
 }: any) {
   const [tab, setTab] = useState("Organisation");
+  const [preferredTerminology, setPreferredTerminology] = useState("");
+  const [restrictedPhrases, setRestrictedPhrases] = useState("");
+  const [visualIdentityNotes, setVisualIdentityNotes] = useState("");
+  const [industry, setIndustry] = useState("Food & Beverage");
+  const [countryMarket, setCountryMarket] = useState("India");
+  const [description, setDescription] = useState("");
   const [p, setP] = useState<Product>({
     name: "",
     sku: "",
@@ -1057,25 +1178,196 @@ function Admin({
     claims: "",
     proof: "",
   });
-  const [proof, setProof] = useState("");
+  const [proofFile, setProofFile] = useState<File | null>(null);
   const [logo, setLogo] = useState("");
-  const save = (e: any) => {
+  const [documentFiles, setDocumentFiles] = useState<File[]>([]);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!brandId) return;
+    let active = true;
+    listProducts(brandId)
+      .then((rows: any[]) => {
+        if (!active) return;
+        setProducts(rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          sku: row.sku,
+          category: row.category || "",
+          facts: row.specifications || "",
+          claims: Array.isArray(row.claims)
+            ? row.claims.map((claim: any) => claim.claim_text).join("\n")
+            : "",
+          proof: "See Proof documents",
+        })));
+      })
+      .catch((error: unknown) => {
+        if (active) notify(error instanceof Error ? error.message : "Could not load products.");
+      });
+    listDocuments(brandId)
+      .then((rows) => { if (active) setDocuments(rows as any[]); })
+      .catch(() => { if (active) setDocuments([]); });
+    return () => { active = false; };
+  }, [brandId, setProducts]);
+
+
+
+  const saveOrganization = async (e: any) => {
     e.preventDefault();
-    if (!p.name || !p.sku) {
+
+    if (!org.trim() || !brand.trim()) {
+      notify("Organization and brand names are required.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const payload = {
+        legal_name: org.trim(),
+        primary_brand_name: brand.trim(),
+        industry,
+        country_market: countryMarket,
+        description: description.trim() || null,
+      };
+
+      // Create when database is empty; update otherwise.
+      const result = organizationId
+        ? await updateOrganization(organizationId, payload)
+        : await createOrganization(payload);
+
+      if (!result?.id || !result?.brand_id) {
+        throw new Error("Invalid organization response.");
+      }
+
+      setOrganizationId(result.id);
+      setBrandId(result.brand_id);
+
+      setOrg(result.legal_name);
+      setBrand(result.primary_brand_name);
+
+      localStorage.setItem(
+        "verityai_organization_id",
+        String(result.id)
+      );
+
+      localStorage.setItem(
+        "verityai_brand_id",
+        String(result.brand_id)
+      );
+
+      notify(
+        organizationId
+          ? "Organization updated successfully."
+          : "Organization created successfully."
+      );
+
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Could not save organization."
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+
+  const saveBrandGuidelines = async (e: any) => {
+    e.preventDefault();
+    if (!brandId) {
+      notify("Save the organisation first to create its brand.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveGuidelines(brandId, {
+        voice_and_tone: guides,
+        preferred_terminology: preferredTerminology,
+        restricted_phrases: restrictedPhrases,
+        visual_identity_notes: visualIdentityNotes,
+      });
+      notify("Brand guidelines saved to PostgreSQL.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not save guidelines.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const save = async (e: any) => {
+    e.preventDefault();
+    if (!brandId) {
+      notify("Save the organisation first before adding products.");
+      setTab("Organisation");
+      return;
+    }
+    if (!p.name.trim() || !p.sku.trim()) {
       notify("Product name and ID are required.");
       return;
     }
-    setProducts((old: Product[]) =>
-      old.some((x) => x.sku === p.sku)
-        ? old.map((x) =>
-            x.sku === p.sku ? { ...p, proof: proof || p.proof } : x,
-          )
-        : [...old, { ...p, proof: proof || "No proof document attached" }],
-    );
-    notify("Product saved in current browser session.");
-    setP({ name: "", sku: "", category: "", facts: "", claims: "", proof: "" });
-    setProof("");
-    setTab("Products & facts");
+    setSaving(true);
+    try {
+      const result: any = await createProduct(brandId, {
+        name: p.name.trim(),
+        sku: p.sku.trim(),
+        category: p.category.trim(),
+        specifications: p.facts.trim(),
+        approved_claims: p.claims.split("\n").map((x) => x.trim()).filter(Boolean),
+      });
+      if (proofFile) {
+        await uploadDocument(brandId, proofFile, "product_specification", result.id);
+      }
+      const rows: any[] = await listProducts(brandId);
+      setProducts(rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        sku: row.sku,
+        category: row.category || "",
+        facts: row.specifications || "",
+        claims: Array.isArray(row.claims) ? row.claims.map((claim: any) => claim.claim_text).join("\n") : "",
+        proof: "See Proof documents",
+      })));
+      if (proofFile) {
+        const docs = await listDocuments(brandId);
+        setDocuments(docs as any[]);
+      }
+      notify("Product and claims saved to PostgreSQL.");
+      setP({ name: "", sku: "", category: "", facts: "", claims: "", proof: "" });
+      setProofFile(null);
+      setTab("Products & facts");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not save product.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const uploadProofDocuments = async () => {
+    if (!brandId) {
+      notify("Save the organisation first before uploading documents.");
+      setTab("Organisation");
+      return;
+    }
+    if (!documentFiles.length) {
+      notify("Choose one or more PDF files first.");
+      return;
+    }
+    setSaving(true);
+    try {
+      for (const documentFile of documentFiles) {
+        await uploadDocument(brandId, documentFile, "supporting");
+      }
+      setDocuments((await listDocuments(brandId)) as any[]);
+      setDocumentFiles([]);
+      notify("Supporting PDF document(s) uploaded to PostgreSQL.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Document upload failed.");
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <>
@@ -1114,10 +1406,7 @@ function Admin({
               sub="Set up the workspace identity."
             />
             <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                notify("Organisation details updated in this session.");
-              }}
+              onSubmit={saveOrganization}
               className="fields two"
             >
               <Field label="Organisation legal name">
@@ -1135,7 +1424,7 @@ function Admin({
                 />
               </Field>
               <Field label="Industry">
-                <select>
+                <select value={industry} onChange={(e) => setIndustry(e.target.value)}>
                   <option>Food & Beverage</option>
                   <option>Consumer goods</option>
                   <option>Healthcare</option>
@@ -1145,7 +1434,7 @@ function Admin({
                 </select>
               </Field>
               <Field label="Country / market">
-                <select>
+                <select value={countryMarket} onChange={(e) => setCountryMarket(e.target.value)}>
                   <option>India</option>
                   <option>United States</option>
                   <option>United Kingdom</option>
@@ -1156,18 +1445,32 @@ function Admin({
                 <Field label="Organisation description">
                   <textarea
                     rows={3}
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
                     placeholder="What does your organisation make or provide?"
                   />
                 </Field>
               </div>
+
               <div className="wide formactions">
                 <small>
-                  <LockKeyhole size={14} /> Private workspace controls planned
+                  <LockKeyhole size={14} /> Existing organizations remain saved in the database.
                 </small>
-                <button className="btn primary">
-                  <CheckCircle2 size={15} /> Save organisation
-                </button>
+
+                <div className="actions">
+
+
+                  <button className="btn primary" disabled={saving}>
+                    <CheckCircle2 size={15} />
+                    {saving
+                      ? "Saving..."
+                      : organizationId
+                        ? "Save changes"
+                        : "Create organization"}
+                  </button>
+                </div>
               </div>
+
             </form>
           </section>
           <aside className="panel">
@@ -1203,10 +1506,7 @@ function Admin({
             />
             <form
               className="fields"
-              onSubmit={(e) => {
-                e.preventDefault();
-                notify("Guidelines updated in this session.");
-              }}
+              onSubmit={saveBrandGuidelines}
             >
               <Field label="Brand voice and tone">
                 <textarea
@@ -1241,7 +1541,7 @@ function Admin({
                 />
                 {logo && <small>{logo}</small>}
               </Field>
-              <button className="btn primary">Save guidelines</button>
+              <button className="btn primary" disabled={saving}>{saving ? "Saving…" : "Save guidelines"}</button>
             </form>
           </section>
           <aside className="panel">
@@ -1272,7 +1572,7 @@ function Admin({
                   placeholder="Classic Biscuits"
                 />
               </Field>
-              <Field label="Product SKU / ID">
+              <Field label="Product ID">
                 <input
                   required
                   value={p.sku}
@@ -1309,19 +1609,18 @@ function Admin({
                 <Field label="Proof document">
                   <input
                     type="file"
-                    accept=".pdf,.doc,.docx,.txt,image/*"
-                    onChange={(e) => setProof(e.target.files?.[0]?.name || "")}
+                    accept=".pdf,application/pdf"
+                    onChange={(e) => setProofFile(e.target.files?.[0] || null)}
                   />
-                  {proof && <small>Selected: {proof}</small>}
+                  {proofFile && <small>Selected: {proofFile.name}</small>}
                 </Field>
               </div>
               <div className="wide formactions">
                 <small>
-                  <FileText size={14} /> File contents are not uploaded or
-                  parsed yet.
+                  <FileText size={14} /> Product facts and claims are saved to PostgreSQL; selected PDF is uploaded as supporting evidence.
                 </small>
-                <button className="btn primary">
-                  <Plus size={15} /> Save product
+                <button className="btn primary" disabled={saving}>
+                  <Plus size={15} /> {saving ? "Saving…" : "Save product"}
                 </button>
               </div>
             </form>
@@ -1329,7 +1628,7 @@ function Admin({
           <section className="panel">
             <PanelTitle
               title="Product records"
-              sub={`${products.length} records in this session`}
+              sub={`${products.length} product records from the backend`}
             />
             {products.map((x: Product) => (
               <div className="pulse" key={x.sku}>
@@ -1341,7 +1640,7 @@ function Admin({
                   </small>
                   <small>{x.proof}</small>
                 </div>
-                <Badge text="Demo data" />
+                <Badge text="Database" />
               </div>
             ))}
           </section>
@@ -1358,17 +1657,29 @@ function Admin({
           <input
             type="file"
             multiple
-            accept=".pdf,.doc,.docx,.txt,image/*"
-            onChange={(e) =>
-              notify(
-                `${e.target.files?.length || 0} file(s) selected for demo only.`,
-              )
-            }
+            accept=".pdf,application/pdf"
+            onChange={(e) => setDocumentFiles(Array.from(e.target.files || []))}
           />
           <small>
-            Prototype only: files are not uploaded to a server, extracted, or
-            approved.
+            Selected: {documentFiles.length} PDF file(s). PDFs are stored by the backend and remain pending until reviewed.
           </small>
+          <button className="btn primary" onClick={uploadProofDocuments} disabled={saving}>
+            <Upload size={15} /> {saving ? "Uploading…" : "Upload selected PDFs"}
+          </button>
+          <hr />
+          <PanelTitle title="Uploaded documents" sub={`${documents.length} document(s) stored for this brand`} />
+          {documents.length === 0 ? (
+            <p className="mutedtext">No documents loaded. Save the organisation first and upload a PDF.</p>
+          ) : documents.map((doc: any) => (
+            <div className="pulse" key={doc.id}>
+              <FileText />
+              <div>
+                <b>{doc.filename}</b>
+                <small>{doc.document_type} · {doc.file_size} bytes · {doc.approval_status}</small>
+                <small><a href={buildDocumentDownloadUrl(doc.id)} target="_blank" rel="noreferrer">Download PDF</a></small>
+              </div>
+            </div>
+          ))}
           <div className="notice">
             Before use as evidence, an authorised person should confirm source,
             version, effective date and approval status.
@@ -1410,3 +1721,372 @@ function Detail({ label, value }: { label: string; value: string }) {
 function FileCheck2Icon() {
   return <FileUp />;
 }
+
+
+function KnowledgeBase({
+  brandId,
+  brand,
+  notify,
+}: {
+  brandId: number | null;
+  brand: string;
+  notify: (message: string) => void;
+}) {
+  const [products, setProducts] = useState<any[]>([]);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [guidelines, setGuidelines] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadKnowledgeBase() {
+      if (!brandId) {
+        setProducts([]);
+        setDocuments([]);
+        setGuidelines(null);
+        setLoading(false);
+        setError(
+          "No saved brand is selected. Save an organisation in Organization Admin first."
+        );
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+
+      try {
+        const [productRows, documentRows, guidelineData] =
+          await Promise.all([
+            listProducts(brandId),
+            listDocuments(brandId),
+            getGuidelines(brandId),
+          ]);
+
+        if (!active) return;
+
+        setProducts(productRows);
+        setDocuments(documentRows);
+        setGuidelines(
+          Array.isArray(guidelineData)
+            ? guidelineData[0] ?? null
+            : guidelineData
+        );
+
+        setSelectedProduct((current) => {
+          if (
+            current !== null &&
+            productRows.some((p: any) => p.id === current)
+          ) {
+            return current;
+          }
+          return productRows[0]?.id ?? null;
+        });
+      } catch (err) {
+        if (!active) return;
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Could not load the Knowledge Base."
+        );
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadKnowledgeBase();
+
+    return () => {
+      active = false;
+    };
+  }, [brandId]);
+
+  const selected = products.find(
+    (product) => product.id === selectedProduct
+  );
+
+  const guidelineText =
+    guidelines?.voice_and_tone ||
+    guidelines?.brand_voice_and_tone ||
+    "";
+
+  const terminology =
+    guidelines?.preferred_terminology || "";
+
+  const restricted =
+    guidelines?.restricted_phrases ||
+    guidelines?.restricted_or_prohibited_phrases ||
+    "";
+
+  const visualNotes =
+    guidelines?.visual_identity_notes || "";
+
+
+  return (
+    <>
+      <Heading
+        eyebrow="APPROVED SOURCES"
+        title="Knowledge Base"
+        desc="View saved brand guidelines, product facts, marketing claims and supporting evidence retrieved from PostgreSQL."
+        action={
+          <NavLink className="btn primary" to="/admin">
+            <Plus size={16} /> Add information
+          </NavLink>
+        }
+      />
+
+      <div className="stats three">
+        <Stat
+          label="Products"
+          value={String(products.length)}
+          icon={<Package />}
+          note="Loaded from PostgreSQL"
+        />
+        <Stat
+          label="Brand guidelines"
+          value={guidelines ? "01" : "00"}
+          icon={<BookOpenCheck />}
+          note={guidelines ? "Saved record found" : "No saved record found"}
+        />
+        <Stat
+          label="Proof references"
+          value={String(documents.length)}
+          icon={<FileCheck2Icon />}
+          note="Stored documents"
+        />
+      </div>
+
+      {loading && (
+        <section className="panel">
+          <p>Loading saved organisation information…</p>
+        </section>
+      )}
+
+      {!loading && error && (
+        <section className="panel">
+          <PanelTitle
+            title="Could not load all knowledge records"
+            sub="Check your backend connection and saved brand ID."
+          />
+          <p className="source-text">{error}</p>
+          <button
+            className="btn primary"
+            onClick={() => window.location.reload()}
+          >
+            Retry
+          </button>
+        </section>
+      )}
+
+      {!loading && !error && (
+        <>
+          <section className="panel">
+            <PanelTitle
+              title="Brand guidelines"
+              sub={`${brand} · retrieved from the backend`}
+            />
+
+            {guidelines ? (
+              <>
+                <div className="detail">
+                  <span>Brand voice and tone</span>
+                  <b>{guidelineText || "Not provided"}</b>
+                </div>
+
+                <div className="detail">
+                  <span>Preferred terminology</span>
+                  <b>{terminology || "Not provided"}</b>
+                </div>
+
+                <div className="detail">
+                  <span>Restricted or prohibited phrases</span>
+                  <b>{restricted || "Not provided"}</b>
+                </div>
+
+                <div className="detail">
+                  <span>Visual identity notes</span>
+                  <b>{visualNotes || "Not provided"}</b>
+                </div>
+
+                <Badge text="Saved record" />
+              </>
+            ) : (
+              <div className="empty">
+                <BookOpenCheck size={28} />
+                <b>No saved guidelines returned</b>
+                <p>
+                  Save the brand guidelines in Organization Admin,
+                  then refresh this page.
+                </p>
+                <NavLink className="btn secondary" to="/admin">
+                  Open Organization Admin
+                </NavLink>
+              </div>
+            )}
+          </section>
+
+          <section className="panel">
+            <PanelTitle
+              title="Product facts & source records"
+              sub={`${products.length} product(s) retrieved from the database. Select a product to inspect its stored details.`}
+            />
+
+            {products.length === 0 ? (
+              <div className="empty">
+                <Package size={30} />
+                <b>No products found</b>
+                <p>Add a product in Organization Admin to populate this list.</p>
+                <NavLink className="btn primary" to="/admin">
+                  <Plus size={15} /> Add product
+                </NavLink>
+              </div>
+            ) : (
+              <>
+                <div className="fields">
+                  <label className="field">
+                    <span>Select product</span>
+                    <select
+                      value={selectedProduct ?? ""}
+                      onChange={(e) =>
+                        setSelectedProduct(
+                          e.target.value ? Number(e.target.value) : null
+                        )
+                      }
+                    >
+                      {products.map((product) => (
+                        <option key={product.id} value={product.id}>
+                          {product.name} · {product.sku}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                {selected && (
+                  <div className="pulse">
+                    <Package />
+                    <div>
+                      <b>{selected.name}</b>
+                      <small>
+                        Product ID: {selected.id} · SKU: {selected.sku}
+                      </small>
+                      <small>
+                        Category: {selected.category || "Not specified"}
+                      </small>
+                    </div>
+                    <Badge text="Database" />
+                  </div>
+                )}
+
+                {selected && (
+                  <>
+                    <div className="detail">
+                      <span>Key facts and specifications</span>
+                      <b>{selected.specifications || "Not provided"}</b>
+                    </div>
+
+                    <PanelTitle
+                      title="Marketing claims"
+                      sub="Claims stored against this product"
+                    />
+
+                    {Array.isArray(selected.claims) &&
+                      selected.claims.length > 0 ? (
+                      selected.claims.map((claim: any) => (
+                        <div className="pulse" key={claim.id}>
+                          <FileText />
+                          <div>
+                            <b>{claim.claim_text}</b>
+                            <small>
+                              Claim ID: {claim.id}
+                            </small>
+                          </div>
+                          <Badge
+                            text={claim.approval_status || "Pending"}
+                          />
+                        </div>
+                      ))
+                    ) : (
+                      <p className="mutedtext">
+                        No marketing claim records were returned for this product.
+                      </p>
+                    )}
+                  </>
+                )}
+
+                <div className="tablewrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>PRODUCT</th>
+                        <th>SKU</th>
+                        <th>CATEGORY</th>
+                        <th>FACTS</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {products.map((product) => (
+                        <tr key={product.id}>
+                          <td>{product.name}</td>
+                          <td>{product.sku}</td>
+                          <td>{product.category || "—"}</td>
+                          <td>{product.specifications || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="panel">
+            <PanelTitle
+              title="Evidence library"
+              sub={`${documents.length} document(s) retrieved from PostgreSQL`}
+            />
+
+            {documents.length === 0 ? (
+              <div className="empty">
+                <FileText size={28} />
+                <b>No supporting documents found</b>
+                <p>Upload a PDF in Organization Admin to see it here.</p>
+              </div>
+            ) : (
+              documents.map((doc: any) => (
+                <div className="pulse" key={doc.id}>
+                  <FileText />
+                  <div>
+                    <b>{doc.filename}</b>
+                    <small>
+                      Document ID: {doc.id} · {doc.document_type}
+                    </small>
+                    <small>
+                      {doc.file_size} bytes · Product ID:{" "}
+                      {doc.product_id ?? "Brand-wide"}
+                    </small>
+                  </div>
+                  <div>
+                    <Badge text={doc.approval_status || "Pending"} />
+                    <p>
+                      <a
+                        href={buildDocumentDownloadUrl(doc.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Download PDF
+                      </a>
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </section>
+        </>
+      )}
+    </>
+  );
+}
+

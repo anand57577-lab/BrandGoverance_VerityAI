@@ -3,6 +3,8 @@ import { NavLink, Routes, Route, useLocation } from "react-router-dom";
 import {
   createOrganization,
   saveGuidelines,
+  getCurrentOrganization,
+  updateOrganization,
   createProduct,
   uploadDocument,
   listProducts,
@@ -10,7 +12,14 @@ import {
   getGuidelines,
   analyzeAdvertisement,
   getOrganization,
+  buildDocumentDownloadUrl,
+  getApprovedAdvertisements
 } from "./services/api";
+
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 import {
   ShieldCheck,
@@ -53,9 +62,33 @@ type Product = {
 type Finding = {
   title: string;
   status: string;
+  severity: string;
   detail: string;
-  source: string;
+  source: string | null;
+  suggestedCorrection: string | null;
 };
+
+async function extractPdfText(file: File): Promise<string> {
+  const data = await file.arrayBuffer();
+
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+
+  const pages: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+
+    const pageText = content.items
+      .map((item: any) => item.str || "")
+      .join(" ");
+
+    pages.push(pageText);
+  }
+
+  return pages.join("\n\n").trim();
+}
+
 const initial: Product[] = [];
 const links = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, group: "WORKSPACE" },
@@ -93,20 +126,23 @@ const links = [
 ];
 export default function App() {
   const [products, setProducts] = useState(initial),
-    [org, setOrg] = useState("Northstar Foods Pvt. Ltd."),
-    [brand, setBrand] = useState("Northstar Foods"),
-    [guides, setGuides] = useState(
-      "Friendly, clear, trustworthy. Avoid unsupported health promises and absolute claims.",
-    ),
+    [org, setOrg] = useState(""),
+    [brand, setBrand] = useState(""),
+    [guides, setGuides] = useState(""),
+
     [ad, setAd] = useState(""),
-    [selected, setSelected] = useState("Classic Biscuits"),
+    [selected, setSelected] = useState("Biscuits"),
     [file, setFile] = useState(""),
+    [adFile, setAdFile] = useState<File | null>(null),
     [findings, setFindings] = useState<Finding[] | null>(null),
     [toast, setToast] = useState(""),
     [mobile, setMobile] = useState(false);
   const [analysis, setAnalysis] = useState<any>(null);
+  const [approvedAds, setApprovedAds] = useState<any[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [organizationId, setOrganizationId] = useState<number | null>(() => {
+
     const value = localStorage.getItem("verityai_organization_id");
     return value ? Number(value) : null;
   });
@@ -114,47 +150,48 @@ export default function App() {
     const value = localStorage.getItem("verityai_brand_id");
     return value ? Number(value) : null;
   });
+  const [reviewDecisions, setReviewDecisions] = useState<
+    Record<number, { status: "approved" | "changes_requested"; comment?: string }>
+  >({});
 
   useEffect(() => {
-    const savedOrganizationId = localStorage.getItem(
-      "verityai_organization_id"
-    );
-    const savedBrandId = localStorage.getItem("verityai_brand_id");
+    let active = true;
 
-    if (!savedOrganizationId || !savedBrandId) {
-      return;
-    }
-
-    const organizationIdNumber = Number(savedOrganizationId);
-    const brandIdNumber = Number(savedBrandId);
-
-    if (
-      !Number.isInteger(organizationIdNumber) ||
-      organizationIdNumber <= 0 ||
-      !Number.isInteger(brandIdNumber) ||
-      brandIdNumber <= 0
-    ) {
-      return;
-    }
-
-    setOrganizationId(organizationIdNumber);
-    setBrandId(brandIdNumber);
-
-    getOrganization(organizationIdNumber)
+    getCurrentOrganization()
       .then((result) => {
+        if (!active) return;
+
+        if (!result) {
+          setOrg("");
+          setBrand("");
+          setOrganizationId(null);
+          setBrandId(null);
+
+          localStorage.removeItem("verityai_organization_id");
+          localStorage.removeItem("verityai_brand_id");
+
+          return;
+        }
+
+        setOrganizationId(result.id);
+        setBrandId(result.brand_id);
         setOrg(result.legal_name);
         setBrand(result.primary_brand_name);
-        setBrandId(result.brand_id);
 
-        localStorage.setItem(
-          "verityai_brand_id",
-          String(result.brand_id)
-        );
+        localStorage.setItem("verityai_organization_id", String(result.id));
+        localStorage.setItem("verityai_brand_id", String(result.brand_id));
       })
       .catch((error) => {
-        console.error("Could not restore saved organization:", error);
+        console.error("Organization loading failed:", error);
       });
+
+    return () => {
+      active = false;
+    };
   }, []);
+
+
+
 
 
 
@@ -165,65 +202,90 @@ export default function App() {
     setTimeout(() => setToast(""), 2600);
   };
 
-  
-useEffect(() => {
-  let active = true;
+  useEffect(() => {
+    if (loc.pathname !== "/history") return;
 
-  if (!brandId) {
-    setProducts([]);
+    let active = true;
+    setHistoryLoading(true);
+
+    getApprovedAdvertisements()
+      .then((rows) => {
+        if (active) setApprovedAds(rows);
+      })
+      .catch((error) => {
+        console.error("Could not load verification history:", error);
+        if (active) notify("Could not load approved advertisements.");
+      })
+      .finally(() => {
+        if (active) setHistoryLoading(false);
+      });
+
     return () => {
       active = false;
     };
-  }
+  }, [loc.pathname]);
 
-  listProducts(brandId)
-    .then((rows: any[]) => {
-      if (!active) return;
 
-      const loadedProducts: Product[] = rows.map((row) => ({
-        id: row.id,
-        name: row.name,
-        sku: row.sku,
-        category: row.category || "",
-        facts: row.specifications || "",
-        claims: Array.isArray(row.claims)
-          ? row.claims.map((claim: any) => claim.claim_text).join("\n")
-          : "",
-        proof: "See Proof documents",
-      }));
+  useEffect(() => {
+    let active = true;
 
-      setProducts(loadedProducts);
+    if (!brandId) {
+      setProducts([]);
+      return () => {
+        active = false;
+      };
+    }
 
-      setSelected((current) =>
-        loadedProducts.some((p) => p.name === current)
-          ? current
-          : loadedProducts[0]?.name || ""
-      );
-    })
-    .catch((error: unknown) => {
-      console.error("Could not load products for Brand Governance:", error);
-      if (active) {
-        notify(
-          error instanceof Error
-            ? error.message
-            : "Could not load products."
+    listProducts(brandId)
+      .then((rows: any[]) => {
+        if (!active) return;
+
+        const loadedProducts: Product[] = rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          sku: row.sku,
+          category: row.category || "",
+          facts: row.specifications || "",
+          claims: Array.isArray(row.claims)
+            ? row.claims.map((claim: any) => claim.claim_text).join("\n")
+            : "",
+          proof: "See Proof documents",
+        }));
+
+        setProducts(loadedProducts);
+
+        setSelected((current) =>
+          loadedProducts.some((p) => p.name === current)
+            ? current
+            : loadedProducts[0]?.name || ""
         );
-      }
-    });
+      })
+      .catch((error: unknown) => {
+        console.error("Could not load products for Brand Governance:", error);
+        if (active) {
+          notify(
+            error instanceof Error
+              ? error.message
+              : "Could not load products."
+          );
+        }
+      });
 
-  return () => {
-    active = false;
-  };
-}, [brandId]);
+    return () => {
+      active = false;
+    };
+  }, [brandId]);
+
 
 
   const analyze = async () => {
-    if (!ad.trim()) {
-      notify("Please enter advertisement text first.");
+    if (!ad.trim() && !adFile) {
+      notify("Paste advertisement text or upload a PDF first.");
       return;
     }
 
     const product = products.find((p) => p.name === selected);
+
     if (!product?.id) {
       notify("No database product ID found. Save the product first.");
       return;
@@ -234,27 +296,58 @@ useEffect(() => {
     setAnalysis(null);
 
     try {
-      const result = await analyzeAdvertisement(product.id, ad.trim());
-      setAnalysis(result);
-      setFindings(
-        result.findings.map((finding: any) => ({
-          title: finding.claim_text || "Advertisement finding",
-          status: String(finding.status || "unknown").replace(/_/g, " "),
-          detail: finding.explanation || "",
-          source: finding.source || "No source supplied",
-        })),
+      let advertisementText = ad.trim();
+
+      // Extract text when a PDF is uploaded
+      if (adFile) {
+        notify("Extracting advertisement text from PDF...");
+
+        const extractedText = await extractPdfText(adFile);
+
+        if (!extractedText) {
+          throw new Error(
+            "No readable text found in this PDF. It may be a scanned document."
+          );
+        }
+
+        advertisementText = advertisementText
+          ? `${advertisementText}\n\n${extractedText}`
+          : extractedText;
+      }
+
+      // Use the existing Gemini analysis API
+      const result = await analyzeAdvertisement(
+        product.id,
+        advertisementText
       );
+
+      setAnalysis(result);
+
+      const normalizedFindings = Array.isArray(result.findings)
+        ? result.findings.map((finding: any) => ({
+          title: finding.claim_text || "Advertisement finding",
+          status: String(finding.status || "unverified"),
+          severity: String(finding.severity || "medium"),
+          detail: finding.explanation || "No explanation was returned.",
+          source: finding.source ?? null,
+          suggestedCorrection: finding.suggested_correction ?? null,
+        }))
+        : [];
+
+      setFindings(normalizedFindings);
+
       notify("Advertisement analysis completed.");
     } catch (error) {
       notify(
         error instanceof Error
           ? error.message
-          : "Advertisement analysis failed.",
+          : "Advertisement analysis failed."
       );
     } finally {
       setAnalyzing(false);
     }
   };
+
 
   return (
     <div className="shell">
@@ -534,9 +627,15 @@ useEffect(() => {
                             value={selected}
                             onChange={(e) => setSelected(e.target.value)}
                           >
-                            {products.map((p) => (
-                              <option key={p.sku}>{p.name}</option>
-                            ))}
+                            <option value="">Select a database product</option>
+
+                            {products
+                              .filter((p) => Number.isInteger(p.id) && p.id! > 0)
+                              .map((p) => (
+                                <option key={p.id} value={p.name}>
+                                  {p.name} ({p.sku})
+                                </option>
+                              ))}
                           </select>
                         </Field>
                         <Field label="Content channel">
@@ -555,7 +654,7 @@ useEffect(() => {
                           value={ad}
                           onChange={(e) => setAd(e.target.value)}
                           placeholder={
-                            "Paste ad copy here…\\n\\nExample: “Enjoy our delicious zero-sugar biscuits.”"
+                            "Paste ad copy here…\n\nExample: “Enjoy our delicious zero-sugar biscuits.”"
                           }
                         />
                       </Field>
@@ -566,19 +665,19 @@ useEffect(() => {
                           <input
                             type="file"
                             accept=".txt,.pdf,.doc,.docx,image/*"
-                            onChange={(e) =>
-                              setFile(e.target.files?.[0]?.name || "")
-                            }
+                            onChange={(e) => {
+                              const selectedFile = e.target.files?.[0] || null;
+
+                              setAdFile(selectedFile);
+                              setFile(selectedFile?.name || "");
+                            }}
                           />
                         </label>
-                        <small>
-                          File selection is visual only in this prototype.
-                        </small>
+
                       </div>
                       <div className="notice">
                         <ShieldCheck size={15} /> Only compare against approved
-                        sources for the selected product. Files are not parsed
-                        yet.
+                        sources for the selected product. 
                       </div>
                       <div className="actions">
 
@@ -593,6 +692,7 @@ useEffect(() => {
                           onClick={() => {
                             setAd("");
                             setFile("");
+                            setAdFile(null);
                             setFindings(null);
                             setAnalysis(null);
                           }}
@@ -613,69 +713,96 @@ useEffect(() => {
                             </div>
                             <b>Ready when you are</b>
                             <p>
-                              Submit advertisement content and select Analyze to
-                              see sample results.
+                              Paste advertisement copy above and select Analyze to
+                              review it against the selected product's approved references.
                             </p>
                             <small>
-                              Claims extracted · Evidence retrieved · Findings
-                              explained
+                              Claim review · Evidence comparison · Human verification
                             </small>
                           </div>
                         ) : (
                           <>
 
                             {analysis && (
-                              <>
-                                <div className="demoalert">
-                                  <b>
-                                    Status: {String(analysis.overall_status).replace(/_/g, " ")}
-                                  </b>
-                                  <p>Risk level: {analysis.risk_level}</p>
-                                  <p>{analysis.summary}</p>
-                                  <small>
-                                    AI findings are recommendations and require human verification.
-                                  </small>
-                                </div>
-
-                                {analysis.limitations?.length > 0 && (
-                                  <div className="notice">
-                                    <b>Limitations</b>
-                                    <ul>
-                                      {analysis.limitations.map((item: string, index: number) => (
-                                        <li key={index}>{item}</li>
-                                      ))}
-                                    </ul>
+                              <div className="analysis-overview">
+                                <div className="analysis-topline">
+                                  <div>
+                                    <span className="analysis-eyebrow">VERIFICATION OUTCOME</span>
+                                    <h3>{String(analysis.overall_status || "needs_review").replace(/_/g, " ")}</h3>
+                                    <p>{analysis.summary || "Review the findings below before publication."}</p>
                                   </div>
-                                )}
-                              </>
-                            )}
-
-
-                            {findings.map((f, i) => (
-                              <div className="finding" key={i}>
-                                <div
-                                  className={
-                                    "findingicon " + f.status.toLowerCase()
-                                  }
-                                >
-                                  {f.status === "Conflicting" ? (
-                                    <AlertTriangle size={18} />
-                                  ) : (
-                                    <CheckCircle2 size={18} />
+                                  <span className={`risk-pill risk-${String(analysis.risk_level || "medium").toLowerCase()}`}>
+                                    {String(analysis.risk_level || "medium")} risk
+                                  </span>
+                                </div>
+                                <div className="analysis-metrics">
+                                  <div><strong>{findings?.length ?? 0}</strong><span>Total findings</span></div>
+                                  <div><strong>{findings?.filter((f) => f.severity.toLowerCase() === "high").length ?? 0}</strong><span>High severity</span></div>
+                                  <div><strong>{findings?.filter((f) => f.status === "unverified").length ?? 0}</strong><span>Unverified claims</span></div>
+                                </div>
+                                <div className="analysis-provenance">
+                                  <span><b>Engine</b> {analysis.analysis_engine || "Rule-based analysis"}</span>
+                                  <span><b>Gemini</b> {analysis.gemini_status || "Unknown"}</span>
+                                  {analysis.gemini_model && <span><b>Model</b> {analysis.gemini_model}</span>}
+                                  {analysis.gemini_status === "unavailable" && (
+                                    <p className="engine-warning">Gemini could not complete this request. Findings may contain rule-based checks only.</p>
                                   )}
                                 </div>
-                                <div>
-                                  <div className="findinghead">
-                                    <b>{f.title}</b>
-                                    <Badge text={f.status} />
-                                  </div>
-                                  <p>{f.detail}</p>
-                                  <small>
-                                    <FileText size={13} /> Source: {f.source}
-                                  </small>
-                                </div>
                               </div>
-                            ))}
+                            )}
+                            {findings.length === 0 && (
+                              <div className="notice">The API returned no individual findings. Review the summary and verify the advertisement manually.</div>
+                            )}
+                            {findings.map((f, i) => {
+                              const statusClass = f.status.toLowerCase().replace(/_/g, "-");
+                              const severityClass = f.severity.toLowerCase();
+                              const isRisk = ["guideline_conflict", "unverified"].includes(f.status);
+                              return (
+                                <article className="finding" key={`${f.title}-${i}`}>
+                                  <div className={`findingicon ${statusClass}`}>
+                                    {isRisk ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+                                  </div>
+                                  <div className="findingbody">
+                                    <div className="findinghead">
+                                      <b>{f.title}</b>
+                                      <div className="finding-tags">
+                                        <Badge text={f.status.replace(/_/g, " ")} />
+                                        <span className={`severity-tag severity-${severityClass}`}>{f.severity} severity</span>
+                                      </div>
+                                    </div>
+                                    <p>{f.detail}</p>
+                                    {f.source && <small className="finding-source"><FileText size={13} /> Evidence source: {f.source}</small>}
+                                    {f.suggestedCorrection && (
+                                      <div className="suggested-correction"><b>Suggested action</b><span>{f.suggestedCorrection}</span></div>
+                                    )}
+                                  </div>
+                                </article>
+                              );
+                            })}
+                            {analysis?.conclusion && (
+                              <section className="final-conclusion">
+                                <div className="conclusion-heading">
+                                  <div className="conclusion-icon">
+                                    <Sparkles size={19} />
+                                  </div>
+
+                                  <div>
+                                    <span>FINAL ASSESSMENT</span>
+                                    <h3>Conclusion</h3>
+                                  </div>
+                                </div>
+
+                                <p>{analysis.conclusion}</p>
+
+                                <div className="conclusion-footer">
+                                  <ShieldCheck size={15} />
+                                  <span>
+                                    Final publication approval should be made by a human reviewer.
+                                  </span>
+                                </div>
+                              </section>
+                            )}
+
                           </>
                         )}
                       </div>
@@ -767,6 +894,7 @@ useEffect(() => {
             />
 
 
+
             <Route
               path="/reviews"
               element={
@@ -776,53 +904,100 @@ useEffect(() => {
                     title="Review Centre"
                     desc="Inspect findings, supporting evidence, and review decisions."
                   />
+
                   <section className="panel">
                     <PanelTitle
                       title="Items requiring review"
-                      sub="Demo queue · no server-side records"
+                      sub="Demo queue · decisions stored in current session only"
                     />
-                    {findings ? (
+
+                    {findings && findings.length > 0 ? (
                       <>
-                        {findings.map((f, i) => (
-                          <div className="finding" key={i}>
-                            <div className="findingicon">
-                              <AlertTriangle />
-                            </div>
-                            <div>
-                              <div className="findinghead">
-                                <b>{f.title}</b>
-                                <Badge text="Pending review" />
+                        {findings.map((f, i) => {
+                          const decision = reviewDecisions[i];
+
+                          return (
+                            <div className="finding" key={i}>
+                              <div className="findingicon">
+                                <AlertTriangle />
                               </div>
-                              <p>{f.detail}</p>
-                              <div className="actions">
-                                <button
-                                  className="btn secondary"
-                                  onClick={() =>
-                                    notify("Demo decision only; not saved.")
-                                  }
-                                >
-                                  Request changes
-                                </button>
-                                <button
-                                  className="btn primary"
-                                  onClick={() =>
-                                    notify("Demo approval only; not saved.")
-                                  }
-                                >
-                                  Approve
-                                </button>
+
+                              <div>
+                                <div className="findinghead">
+                                  <b>{f.title}</b>
+
+                                  <Badge
+                                    text={
+                                      decision?.status === "approved"
+                                        ? "Approved"
+                                        : decision?.status === "changes_requested"
+                                          ? "Changes Requested"
+                                          : "Pending review"
+                                    }
+                                  />
+                                </div>
+
+                                <p>{f.detail}</p>
+
+                                {decision?.comment && (
+                                  <p className="review-comment">
+                                    <b>Reviewer comment:</b> {decision.comment}
+                                  </p>
+                                )}
+
+                                <div className="actions">
+                                  <button
+                                    className="btn secondary"
+                                    disabled={!!decision}
+                                    onClick={() => {
+                                      const comment = window.prompt(
+                                        "Enter the reason for requesting changes:"
+                                      );
+
+                                      if (!comment || !comment.trim()) return;
+
+                                      setReviewDecisions((prev) => ({
+                                        ...prev,
+                                        [i]: {
+                                          status: "changes_requested",
+                                          comment: comment.trim(),
+                                        },
+                                      }));
+
+                                      notify("Changes requested successfully.");
+                                    }}
+                                  >
+                                    Request changes
+                                  </button>
+
+                                  <button
+                                    className="btn primary"
+                                    disabled={!!decision}
+                                    onClick={() => {
+                                      setReviewDecisions((prev) => ({
+                                        ...prev,
+                                        [i]: {
+                                          status: "approved",
+                                        },
+                                      }));
+
+                                      notify("Finding approved successfully.");
+                                    }}
+                                  >
+                                    Approve
+                                  </button>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </>
                     ) : (
                       <div className="empty">
                         <ClipboardCheck size={32} />
                         <b>No items in the review queue</b>
                         <p>
-                          Run an analysis in Brand Governance to populate this
-                          demo view.
+                          Run an analysis in Brand Governance to populate this demo view.
                         </p>
                         <NavLink to="/governance" className="btn primary">
                           Open Brand Governance
@@ -833,6 +1008,7 @@ useEffect(() => {
                 </>
               }
             />
+
             <Route
               path="/history"
               element={
@@ -840,61 +1016,89 @@ useEffect(() => {
                   <Heading
                     eyebrow="AUDIT TRAIL"
                     title="Verification History"
-                    desc="Trace previous checks and understand how content decisions were made."
+                    desc="View advertisements approved through VerityAI analysis."
                   />
+
                   <div className="stats three">
                     <Stat
-                      label="Total checks"
-                      value={findings ? "01" : "00"}
-                      icon={<ScanSearch />}
-                      note="This session"
+                      label="Approved advertisements"
+                      value={String(approvedAds.length).padStart(2, "0")}
+                      icon={<CheckCircle2 />}
+                      note="Saved in PostgreSQL"
                     />
                     <Stat
-                      label="Findings"
-                      value={String(findings?.length || 0)}
-                      icon={<AlertTriangle />}
-                      note="Demo results"
+                      label="Products represented"
+                      value={String(new Set(approvedAds.map((x) => x.product_id)).size)}
+                      icon={<Package />}
+                      note="Unique products"
                     />
                     <Stat
-                      label="Persistent audit records"
-                      value="00"
+                      label="Persistent records"
+                      value={String(approvedAds.length).padStart(2, "0")}
                       icon={<FileClock />}
-                      note="Backend planned"
+                      note="Database records"
                     />
                   </div>
+
                   <section className="panel">
                     <PanelTitle
-                      title="Recent activity"
-                      sub="Session-only activity"
+                      title="Approved advertisements"
+                      sub="Advertisements with a positive Gemini verification result."
                     />
-                    {findings ? (
-                      <div className="pulse">
-                        <ScanSearch />
-                        <div>
-                          <b>Advertisement analysis completed</b>
-                          <small>
-                            {findings.length} demo findings · AI integration not
-                            connected
-                          </small>
-                        </div>
-                        <Badge text="Demo" />
+
+                    {historyLoading ? (
+                      <div className="empty">
+                        <p>Loading approved advertisements...</p>
                       </div>
-                    ) : (
+                    ) : approvedAds.length === 0 ? (
                       <div className="empty">
                         <FileClock size={30} />
-                        <b>No verification history yet</b>
+                        <b>No approved advertisements yet</b>
                         <p>
-                          Run your first demo analysis to see a sample record.
+                          Advertisements with a positive verification result
+                          will appear here automatically.
                         </p>
                         <NavLink to="/governance" className="btn secondary">
                           Start verification
                         </NavLink>
                       </div>
+                    ) : (
+                      approvedAds.map((item) => (
+                        <article className="finding" key={item.id}>
+                          <div className="findingicon">
+                            <CheckCircle2 />
+                          </div>
+
+                          <div className="findingbody">
+                            <div className="findinghead">
+                              <b>{item.product_name}</b>
+                              <Badge text="Approved" />
+                            </div>
+
+                            <p>
+                              <strong>Product details:</strong>{" "}
+                              {item.product_details || "No product details available."}
+                            </p>
+
+                            <p>
+                              <strong>Advertisement:</strong>
+                              <br />
+                              {item.advertisement_text}
+                            </p>
+
+                            <small>
+                              Verified on:{" "}
+                              {new Date(item.created_at).toLocaleString()}
+                            </small>
+                          </div>
+                        </article>
+                      ))
                     )}
                   </section>
                 </>
               }
             />
+
             <Route
               path="/settings"
               element={
@@ -1118,12 +1322,12 @@ function Admin({
   setBrandId,
 }: any) {
   const [tab, setTab] = useState("Organisation");
-  const [industry, setIndustry] = useState("Food & Beverage");
-  const [countryMarket, setCountryMarket] = useState("India");
-  const [description, setDescription] = useState("");
   const [preferredTerminology, setPreferredTerminology] = useState("");
   const [restrictedPhrases, setRestrictedPhrases] = useState("");
   const [visualIdentityNotes, setVisualIdentityNotes] = useState("");
+  const [industry, setIndustry] = useState("Food & Beverage");
+  const [countryMarket, setCountryMarket] = useState("India");
+  const [description, setDescription] = useState("");
   const [p, setP] = useState<Product>({
     name: "",
     sku: "",
@@ -1165,62 +1369,69 @@ function Admin({
     return () => { active = false; };
   }, [brandId, setProducts]);
 
-  const startNewOrganization = () => {
-    // Clear only the currently selected organization.
-    // Existing database records will remain untouched.
-    setOrganizationId(null);
-    setBrandId(null);
 
-    localStorage.removeItem("verityai_organization_id");
-    localStorage.removeItem("verityai_brand_id");
-
-    setOrg("");
-    setBrand("");
-    setIndustry("Food & Beverage");
-    setCountryMarket("India");
-    setDescription("");
-
-    setProducts([]);
-    setDocuments([]);
-    setDocumentFiles([]);
-    setProofFile(null);
-    setP({
-      name: "",
-      sku: "",
-      category: "",
-      facts: "",
-      claims: "",
-      proof: "",
-    });
-
-    notify("Ready to create a new organization.");
-  };
 
   const saveOrganization = async (e: any) => {
     e.preventDefault();
+
+    if (!org.trim() || !brand.trim()) {
+      notify("Organization and brand names are required.");
+      return;
+    }
+
     setSaving(true);
+
     try {
-      const result: any = await createOrganization({
+      const payload = {
         legal_name: org.trim(),
         primary_brand_name: brand.trim(),
         industry,
         country_market: countryMarket,
-        description: description.trim(),
-      });
+        description: description.trim() || null,
+      };
+
+      // Create when database is empty; update otherwise.
+      const result = organizationId
+        ? await updateOrganization(organizationId, payload)
+        : await createOrganization(payload);
+
       if (!result?.id || !result?.brand_id) {
-        throw new Error("The API response must include both id and brand_id. Check OrganizationResponse in the backend.");
+        throw new Error("Invalid organization response.");
       }
+
       setOrganizationId(result.id);
       setBrandId(result.brand_id);
-      localStorage.setItem("verityai_organization_id", String(result.id));
-      localStorage.setItem("verityai_brand_id", String(result.brand_id));
-      notify("Organisation saved to PostgreSQL.");
+
+      setOrg(result.legal_name);
+      setBrand(result.primary_brand_name);
+
+      localStorage.setItem(
+        "verityai_organization_id",
+        String(result.id)
+      );
+
+      localStorage.setItem(
+        "verityai_brand_id",
+        String(result.brand_id)
+      );
+
+      notify(
+        organizationId
+          ? "Organization updated successfully."
+          : "Organization created successfully."
+      );
+
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Could not save organisation.");
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Could not save organization."
+      );
     } finally {
       setSaving(false);
     }
   };
+
 
   const saveBrandGuidelines = async (e: any) => {
     e.preventDefault();
@@ -1269,6 +1480,7 @@ function Admin({
       }
       const rows: any[] = await listProducts(brandId);
       setProducts(rows.map((row) => ({
+        id: row.id,
         name: row.name,
         sku: row.sku,
         category: row.category || "",
@@ -1404,18 +1616,15 @@ function Admin({
                 </small>
 
                 <div className="actions">
-                  <button
-                    type="button"
-                    className="btn secondary"
-                    onClick={startNewOrganization}
-                    disabled={saving}
-                  >
-                    <Plus size={15} /> New organization
-                  </button>
+
 
                   <button className="btn primary" disabled={saving}>
                     <CheckCircle2 size={15} />
-                    {saving ? "Saving…" : "Create organization"}
+                    {saving
+                      ? "Saving..."
+                      : organizationId
+                        ? "Save changes"
+                        : "Create organization"}
                   </button>
                 </div>
               </div>
@@ -1521,7 +1730,7 @@ function Admin({
                   placeholder="Classic Biscuits"
                 />
               </Field>
-              <Field label="Product SKU / ID">
+              <Field label="Product ID">
                 <input
                   required
                   value={p.sku}
@@ -1625,7 +1834,7 @@ function Admin({
               <div>
                 <b>{doc.filename}</b>
                 <small>{doc.document_type} · {doc.file_size} bytes · {doc.approval_status}</small>
-                <small><a href={`${import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000"}/api/documents/${doc.id}/download`} target="_blank" rel="noreferrer">Download PDF</a></small>
+                <small><a href={buildDocumentDownloadUrl(doc.id)} target="_blank" rel="noreferrer">Download PDF</a></small>
               </div>
             </div>
           ))}
@@ -1755,9 +1964,6 @@ function KnowledgeBase({
   const selected = products.find(
     (product) => product.id === selectedProduct
   );
-
-  const apiBase =
-    import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
   const guidelineText =
     guidelines?.voice_and_tone ||
@@ -2024,7 +2230,7 @@ function KnowledgeBase({
                     <Badge text={doc.approval_status || "Pending"} />
                     <p>
                       <a
-                        href={`${apiBase}/api/documents/${doc.id}/download`}
+                        href={buildDocumentDownloadUrl(doc.id)}
                         target="_blank"
                         rel="noreferrer"
                       >
